@@ -1,4 +1,6 @@
 {-# LANGUAGE RecordWildCards  #-}
+{-# OPTIONS_GHC -Wno-unrecognised-pragmas #-}
+{-# HLINT ignore "Redundant variable capture" #-}
 --
 -- INFOB3CC Concurrency
 -- Practical 2: Single Source Shortest Path
@@ -40,6 +42,7 @@ import qualified Data.IntSet                                        as Set
 import qualified Data.Vector.Mutable                                as V
 import qualified Data.Vector.Storable                               as M ( unsafeFreeze )
 import qualified Data.Vector.Storable.Mutable                       as M
+import Data.Maybe (isNothing, fromJust)
 
 
 type Graph    = Gr String Distance  -- Graphs have nodes labelled with Strings and edges labelled with their distance
@@ -133,15 +136,25 @@ step verbose threadCount graph delta buckets distances = do
 --
 allBucketsEmpty :: Buckets -> IO Bool
 allBucketsEmpty buckets = do
-  undefined
+  let 
+    loop index = do
+      let vector = bucketArray buckets
+      maybeValue <- V.readMaybe vector index
+      
+      if isNothing maybeValue then return True -- if value is nothing it means we went out of range and there are only empty buckets
+      else do
+        let value = fromJust maybeValue
+        if not (Set.null value) then return False -- if there is a set that is not empty immediately return False
+        else do loop (index + 1)
+  loop 0
 
 
--- Return the index of the smallest on-empty bucket. Assumes that there is at
+-- Return the index of the smallest non-empty bucket. Assumes that there is at
 -- least one non-empty bucket remaining.
 --
 findNextBucket :: Buckets -> IO Int
 findNextBucket buckets = do
-  undefined
+  undefined -- loop like above, find smallest by using an IORef that stores the smallest
 
 
 -- Create requests of (node, distance) pairs that fulfil the given predicate
