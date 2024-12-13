@@ -42,7 +42,7 @@ import qualified Data.IntSet                                        as Set
 import qualified Data.Vector.Mutable                                as V
 import qualified Data.Vector.Storable                               as M ( unsafeFreeze )
 import qualified Data.Vector.Storable.Mutable                       as M
-import Data.Maybe (isNothing, fromJust)
+import Data.Maybe (isNothing, fromJust, isJust)
 
 
 type Graph    = Gr String Distance  -- Graphs have nodes labelled with Strings and edges labelled with their distance
@@ -136,11 +136,11 @@ step verbose threadCount graph delta buckets distances = do
 --
 allBucketsEmpty :: Buckets -> IO Bool
 allBucketsEmpty buckets = do
-  let 
+  let
     loop index = do
       let vector = bucketArray buckets
       maybeValue <- V.readMaybe vector index
-      
+
       if isNothing maybeValue then return True -- if value is nothing it means we went out of range and there are only empty buckets
       else do
         let value = fromJust maybeValue
@@ -154,7 +154,26 @@ allBucketsEmpty buckets = do
 --
 findNextBucket :: Buckets -> IO Int
 findNextBucket buckets = do
-  undefined -- loop like above, find smallest by using an IORef that stores the smallest
+  minimal <- newIORef (0, round infinity) -- (index, size) (maybe round infinity goes wrong)
+  let
+    loop index = do
+      let vector = bucketArray buckets
+      minimal' <- readIORef minimal
+      maybeValue <- V.readMaybe vector index
+      when (isJust maybeValue)
+        (do
+          let set = fromJust maybeValue
+          let size = Set.size set
+          if snd minimal' > size && snd minimal' > 0 then do
+            writeIORef minimal (index, size) -- maybe parallel issues?
+            loop (index + 1)
+          else do loop (index + 1)
+        )
+
+  loop 0
+  minimal'' <- readIORef minimal
+  firstIndex <- readIORef $ firstBucket buckets
+  return $ fst minimal'' + firstIndex
 
 
 -- Create requests of (node, distance) pairs that fulfil the given predicate
