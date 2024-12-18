@@ -154,26 +154,34 @@ allBucketsEmpty buckets = do
 --
 findNextBucket :: Buckets -> IO Int
 findNextBucket buckets = do
-  minimal <- newIORef (0, round infinity) -- (index, size) (maybe round infinity goes wrong)
   let
+    loop :: Int -> IO Int
     loop index = do
       let vector = bucketArray buckets
-      minimal' <- readIORef minimal
-      maybeValue <- V.readMaybe vector index
-      when (isJust maybeValue)
-        (do
-          let set = fromJust maybeValue
-          let size = Set.size set
-          if snd minimal' > size && snd minimal' > 0 then do
-            writeIORef minimal (index, size) -- maybe parallel issues?
+      maybeSet <- V.readMaybe vector index
+      if isJust maybeSet then do
+          let set = fromJust maybeSet
+          if Set.null set then do
             loop (index + 1)
-          else do loop (index + 1)
-        )
+          else return index
+      else return (-1)
 
   loop 0
-  minimal'' <- readIORef minimal
-  firstIndex <- readIORef $ firstBucket buckets
-  return $ fst minimal'' + firstIndex
+
+
+type Range = (Int, Int)
+
+rangeLength :: Range -> Int
+rangeLength (a, b) = b - a + 1
+
+dropNFromRange :: Int -> Range -> Range
+dropNFromRange n (a, b) = (a + n, b)
+
+getEqualRanges :: Int -> Range -> [Range]
+getEqualRanges amountOfRanges range@(a, _) = f amountOfRanges range a where
+  f 1 r acc = [(acc, acc + rangeLength r - 1)]
+  f n r acc = let len = rangeLength r `div` n in
+    (acc, acc + len - 1) : f (n - 1) (dropNFromRange len r) (acc + len)
 
 
 -- Create requests of (node, distance) pairs that fulfil the given predicate
@@ -184,9 +192,17 @@ findRequests
     -> Graph
     -> IntSet
     -> TentativeDistances
+    -> Int
     -> IO (IntMap Distance)
-findRequests threadCount p graph v' distances = do
-  undefined
+findRequests threadCount p graph v' distances threadIndex = do
+  mapM_ (\index -> do
+    let node = Set.elems v' !! index
+    -- do something with this node in the graph
+    return undefined
+    ) [fst range .. snd range]
+  return undefined where
+    bucketLength = Set.size v'
+    range = getEqualRanges threadCount (0, bucketLength) !! threadIndex
 
 
 -- Execute requests for each of the given (node, distance) pairs
@@ -199,7 +215,10 @@ relaxRequests
     -> IntMap Distance
     -> IO ()
 relaxRequests threadCount buckets distances delta req = do
-  undefined
+  let elems = Map.elems req
+  let keys = Map.keys req
+  let requests = zip keys elems
+  mapM_ (relax buckets distances delta) requests -- should be parrallelisjklzed
 
 
 -- Execute a single relaxation, moving the given node to the appropriate bucket
@@ -211,7 +230,19 @@ relax :: Buckets
       -> (Node, Distance) -- (w, x) in the paper
       -> IO ()
 relax buckets distances delta (node, newDistance) = do
-  undefined
+   tent <- M.read distances node
+   if newDistance < tent then do
+    -- remove from old bucket
+    firstBuck <- readIORef (firstBucket buckets)
+    let remIndex  = floor (div tent delta) - firstBuck
+    let newBucket = Set.delete node (V.elem remIndex)
+    -- insert into new bucket
+    let addIndex   = div newDistance delta
+    let newBucket' = Set.insert newDistance (buckets Map.! addIndex)
+    return ()
+   else undefined
+
+
 
 
 -- -----------------------------------------------------------------------------
