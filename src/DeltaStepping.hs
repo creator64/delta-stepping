@@ -20,9 +20,6 @@ module DeltaStepping (
 
 ) where
 
-import Sample
-import Utils
-
 import Control.Concurrent
 import Control.Monad
 import Data.Graph.Inductive                                         ( Gr )
@@ -102,7 +99,6 @@ initialise
     -> Node
     -> IO (Buckets, TentativeDistances)
 initialise graph delta source = do
-  -- print "---------------initialising---------------"
   let amountOfNodes = length $ G.nodes graph
   tentatives <- M.replicate amountOfNodes infinity
 
@@ -175,7 +171,7 @@ step verbose threadCount graph delta buckets distances = do
         V.write bucketVector realIndex Set.empty
 
         -- should happen in parallel
-        relaxRequests threadCount buckets distances delta requests
+        relaxRequests buckets distances delta requests
 
         loop
   loop
@@ -188,7 +184,7 @@ step verbose threadCount graph delta buckets distances = do
     addRequests (>=delta) graph visited' ranges distances reqs
 
   requests <- readMVar reqs
-  relaxRequests threadCount buckets distances delta requests
+  relaxRequests buckets distances delta requests
   where
     -- divide a set into equal pieces
     getRangesFromSet :: IntSet -> [Range]
@@ -263,8 +259,6 @@ addRequests p graph v' bucketSlices distances mapRef threadIndex = do
   let bucketSlice = bucketSlices !! threadIndex
   newRequests <- findRequests p graph v' bucketSlice distances
 
-  -- print ("new requests: " ++ show newRequests)
-
   -- critical section, write to shared variable
   current <- takeMVar mapRef
   putMVar mapRef (Map.union current newRequests)
@@ -283,7 +277,6 @@ findRequests
 findRequests p graph v' bucketSlice distances = do
   let requestsIO = map handleNode [fst bucketSlice .. snd bucketSlice] -- for each node make a map of requests
   requests <- sequence requestsIO
-  -- print ("requests: " ++ show requests)
   return $ foldr (Map.unionWith min) Map.empty requests -- combine all the requests
   where
     handleNode :: Int -> IO (IntMap Distance)
@@ -312,13 +305,12 @@ findRequests p graph v' bucketSlice distances = do
 -- Execute requests for each of the given (node, distance) pairs
 --
 relaxRequests
-    :: Int
-    -> Buckets
+    :: Buckets
     -> TentativeDistances
     -> Distance
     -> IntMap Distance
     -> IO ()
-relaxRequests threadCount buckets distances delta req = do
+relaxRequests buckets distances delta req = do
   let elems = Map.elems req
   let keys = Map.keys req
   let requests = zip keys elems
@@ -445,20 +437,6 @@ printBuckets graph delta Buckets{..} distances = do
       printBucket graph b distances
     )
     [ 0 .. V.length bucketArray - 1 ]
-
--- Print the current bucket
---
-printCurrentBucket
-    :: Graph
-    -> Distance
-    -> Buckets
-    -> TentativeDistances
-    -> IO ()
-printCurrentBucket graph delta Buckets{..} distances = do
-  j <- readIORef firstBucket
-  b <- V.read bucketArray (j `rem` V.length bucketArray)
-  printf "Bucket %d: [%f, %f)\n" j (fromIntegral j * delta) (fromIntegral (j+1) * delta)
-  printBucket graph b distances
 
 -- Print a given bucket
 --
