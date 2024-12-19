@@ -37,8 +37,8 @@ import qualified Data.IntSet                                        as Set
 import qualified Data.Vector.Mutable                                as V
 import qualified Data.Vector.Storable                               as M ( unsafeFreeze )
 import qualified Data.Vector.Storable.Mutable                       as M
-import Data.Maybe (isNothing, fromJust)
-import Data.Foldable (foldrM)
+import Data.Maybe (isNothing, fromJust, isJust)
+import Data.Foldable (foldlM)
 
 
 type Graph    = Gr String Distance  -- Graphs have nodes labelled with Strings and edges labelled with their distance
@@ -102,12 +102,13 @@ initialise
     -> Node
     -> IO (Buckets, TentativeDistances)
 initialise graph delta source = do
+  -- print "---------------initialising---------------"
   let amountOfNodes = length $ G.nodes graph
   tentatives <- M.replicate amountOfNodes infinity
 
   let lEdges = G.labEdges graph
   let maximumDistance = maximum (map (\(_, _, distance) -> distance) lEdges) -- find longest edge
-  bucketVector <- V.replicate (ceiling $ maximumDistance / delta) Set.empty
+  bucketVector <- V.replicate (max 1 $ ceiling $ maximumDistance / delta) Set.empty
 
   firstBucketIORef <- newIORef 0
   let buckets = Buckets {firstBucket = firstBucketIORef, bucketArray = bucketVector}
@@ -262,9 +263,12 @@ addRequests p graph v' bucketSlices distances mapRef threadIndex = do
   let bucketSlice = bucketSlices !! threadIndex
   newRequests <- findRequests p graph v' bucketSlice distances
 
+  -- print ("new requests: " ++ show newRequests)
+
   -- critical section, write to shared variable
   current <- takeMVar mapRef
   putMVar mapRef (Map.union current newRequests)
+  -- end of critical section
 
 
 -- Create requests of (node, distance) pairs that fulfil the given predicate
@@ -279,25 +283,30 @@ findRequests
 findRequests p graph v' bucketSlice distances = do
   let requestsIO = map handleNode [fst bucketSlice .. snd bucketSlice] -- for each node make a map of requests
   requests <- sequence requestsIO
-  return $ foldr Map.union Map.empty requests -- combine all the requests
+  -- print ("requests: " ++ show requests)
+  return $ foldr (Map.unionWith min) Map.empty requests -- combine all the requests
   where
     handleNode :: Int -> IO (IntMap Distance)
     handleNode index = do
-      foldrM addToMap Map.empty validNeighbours where
+      foldlM addToMap Map.empty validNeighbours
+      where
         node :: Node -- Node is alias for int
         node = Set.elems v' !! index
 
-        neighbours :: [(Distance, Node)]
-        neighbours = G.lneighbors graph node
+        neighbours :: [(Node, Distance)]
+        neighbours = G.lsuc graph node
 
-        validNeighbours :: [(Distance, Node)]
-        validNeighbours = filter (p.fst) neighbours
+        validNeighbours :: [(Node, Distance)]
+        validNeighbours = filter (p.snd) neighbours
 
-        addToMap :: (Distance, Node) -> IntMap Distance -> IO (IntMap Distance)
-        addToMap (distance, neighbour) oldMap = do
+        addToMap :: IntMap Distance -> (Node, Distance) -> IO (IntMap Distance)
+        addToMap oldMap (neighbour, distance) = do
           tentative <- M.read distances node
           let newDistance = tentative + distance
-          return $ Map.insert neighbour newDistance oldMap
+          let oldDistance = (Map.!?) oldMap neighbour
+          if isJust oldDistance && fromJust oldDistance <= newDistance
+            then return oldMap
+            else return $ Map.insert neighbour newDistance oldMap
 
 
 -- Execute requests for each of the given (node, distance) pairs
