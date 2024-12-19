@@ -314,7 +314,7 @@ relaxRequests buckets distances delta req = do
   let elems = Map.elems req
   let keys = Map.keys req
   let requests = zip keys elems
-  mapM_ (relax buckets distances delta) requests -- should be parrallelisjklzed
+  mapM_ (relax buckets distances delta) requests
 
 
 -- Execute a single relaxation, moving the given node to the appropriate bucket
@@ -342,8 +342,6 @@ relax buckets distances delta (node, newDistance) = do
 
       M.write distances node newDistance
     )
-
--- add locking 
 
 
 
