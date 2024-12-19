@@ -24,17 +24,12 @@ import Sample
 import Utils
 
 import Control.Concurrent
-import Control.Concurrent.MVar
 import Control.Monad
-import Data.Bits
 import Data.Graph.Inductive                                         ( Gr )
 import Data.IORef
 import Data.IntMap.Strict                                           ( IntMap )
 import Data.IntSet                                                  ( IntSet )
 import Data.Vector.Storable                                         ( Vector )
-import Data.Word
-import Foreign.Ptr
-import Foreign.Storable
 import Text.Printf
 import qualified Data.Graph.Inductive                               as G
 import qualified Data.IntMap.Strict                                 as Map
@@ -42,7 +37,7 @@ import qualified Data.IntSet                                        as Set
 import qualified Data.Vector.Mutable                                as V
 import qualified Data.Vector.Storable                               as M ( unsafeFreeze )
 import qualified Data.Vector.Storable.Mutable                       as M
-import Data.Maybe (isNothing, fromJust, isJust)
+import Data.Maybe (isNothing, fromJust)
 import Data.Foldable (foldrM)
 
 
@@ -141,24 +136,28 @@ step verbose threadCount graph delta buckets distances = do
   --   printVerbose verbose "inner step" graph delta buckets distances
   -- in the inner loop.
 
-  -- get current index and bucket
-  realIndex <- findNextBucket buckets
-  let bucketVector = bucketArray buckets
-  currentBucket <- V.read bucketVector realIndex
+  -- handle retrieving and updating the bucket index and the real index
+  bucketIndex <- findNextBucket buckets
+  writeIORef (firstBucket buckets) bucketIndex
 
-  -- divide bucket equally
-  let bucketLength = Set.size currentBucket
-  let bucketRanges = getEqualRanges threadCount (0, bucketLength)
+  let bucketVector = bucketArray buckets
+  let realIndex = bucketIndex `mod` V.length bucketVector
 
   -- create MVars for remembering
-  reqs <- newMVar Map.empty
-  visited <- newMVar Set.empty
+  visited <- newIORef Set.empty
 
   -- inner loop
   let
     loop = do
+      printVerbose verbose "inner loop" graph delta buckets distances
+      currentBucket <- V.read bucketVector realIndex
       if Set.null currentBucket then return ()
       else do
+        reqs <- newMVar Map.empty
+
+        -- divide bucket equally
+        let bucketRanges = getRangesFromSet currentBucket
+
         -- create requests for light edges in parallel
         forkThreads threadCount $
           addRequests (<delta) graph currentBucket bucketRanges distances reqs
@@ -167,25 +166,32 @@ step verbose threadCount graph delta buckets distances = do
         requests <- readMVar reqs
 
         -- remember which nodes have been in the current bucket
-        visited' <- takeMVar visited
-        let nodes = Map.keys requests
-        let newSet = foldr Set.insert visited' nodes
-        putMVar visited newSet
-        
+        visited' <- readIORef visited
+        let newSet = Set.union visited' currentBucket
+        writeIORef visited newSet
+
         -- make the current bucket empty
         V.write bucketVector realIndex Set.empty
 
+        -- should happen in parallel
         relaxRequests threadCount buckets distances delta requests
 
         loop
   loop
 
+  reqs <- newMVar Map.empty
   -- create requests for heavy edges in parallel
+  visited' <- readIORef visited
+  let ranges = getRangesFromSet visited'
   forkThreads threadCount $
-    addRequests (>delta) graph currentBucket bucketRanges distances reqs
+    addRequests (>=delta) graph visited' ranges distances reqs
 
   requests <- readMVar reqs
   relaxRequests threadCount buckets distances delta requests
+  where
+    -- divide a set into equal pieces
+    getRangesFromSet :: IntSet -> [Range]
+    getRangesFromSet set = getEqualRanges threadCount (0, Set.size set - 1)
 
 
 -- Once all buckets are empty, the tentative distances are finalised and the
@@ -222,7 +228,7 @@ findNextBucket buckets = do
       let set = fromJust maybeSet
       if Set.null set then do
         loop (bucketIndex + 1)
-      else return realIndex
+      else return bucketIndex
 
   firstBuck <- readIORef (firstBucket buckets)
   loop firstBuck
@@ -276,7 +282,7 @@ findRequests p graph v' bucketSlice distances = do
   return $ foldr Map.union Map.empty requests -- combine all the requests
   where
     handleNode :: Int -> IO (IntMap Distance)
-    handleNode index =
+    handleNode index = do
       foldrM addToMap Map.empty validNeighbours where
         node :: Node -- Node is alias for int
         node = Set.elems v' !! index
@@ -324,7 +330,7 @@ relax buckets distances delta (node, newDistance) = do
     do
       let size = V.length $ bucketArray buckets
       -- remove from old bucket
-      let remIndex = floor (tent / delta) `mod` size -- should be something with modulo the length of the bucket vector
+      let remIndex = floor (tent / delta) `mod` size
       oldBucket <- V.read (bucketArray buckets) remIndex
       V.write (bucketArray buckets) remIndex (Set.delete node oldBucket)
 
