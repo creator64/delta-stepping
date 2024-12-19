@@ -184,6 +184,22 @@ getEqualRanges amountOfRanges range@(a, _) = f amountOfRanges range a where
     (acc, acc + len - 1) : f (n - 1) (dropNFromRange len r) (acc + len)
 
 
+addRequests
+    :: Int
+    -> (Distance -> Bool)
+    -> Graph
+    -> IntSet
+    -> TentativeDistances
+    -> IORef (IntMap Distance)
+    -> Int
+    -> IO ()
+    -- because we only add elements to the map, this is a wait-free algorithm and we can just use an IORef
+addRequests threadCount p graph v' distances mapRef threadIndex =  do
+  current <- readIORef mapRef
+  newRequests <- findRequests threadCount p graph v' distances threadIndex
+  writeIORef mapRef (Map.union current newRequests) 
+
+
 -- Create requests of (node, distance) pairs that fulfil the given predicate
 --
 findRequests
@@ -195,14 +211,26 @@ findRequests
     -> Int
     -> IO (IntMap Distance)
 findRequests threadCount p graph v' distances threadIndex = do
-  mapM_ (\index -> do
-    let node = Set.elems v' !! index
-    -- do something with this node in the graph
-    return undefined
-    ) [fst range .. snd range]
-  return undefined where
+  let requests = map handleNode [fst bucketSlice .. snd bucketSlice] -- for each node make a map of requests
+  return $ foldr Map.union Map.empty requests -- combine all the requests
+  where
     bucketLength = Set.size v'
-    range = getEqualRanges threadCount (0, bucketLength) !! threadIndex
+    bucketSlice = getEqualRanges threadCount (0, bucketLength) !! threadIndex -- the part of the bucket this thread will do
+    
+    handleNode :: Int -> IntMap Distance
+    handleNode index =
+      foldr addToMap Map.empty validNeighbours where 
+        node :: Node -- Node is alias for int
+        node = Set.elems v' !! index
+
+        neighbours :: [(Distance, Node)] 
+        neighbours = G.lneighbors graph node
+
+        validNeighbours :: [(Distance, Node)] 
+        validNeighbours = filter (p.fst) neighbours
+
+        addToMap :: (Distance, Node) -> IntMap Distance -> IntMap Distance
+        addToMap = (uncurry.flip) Map.insert
 
 
 -- Execute requests for each of the given (node, distance) pairs
