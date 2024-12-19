@@ -43,6 +43,7 @@ import qualified Data.Vector.Mutable                                as V
 import qualified Data.Vector.Storable                               as M ( unsafeFreeze )
 import qualified Data.Vector.Storable.Mutable                       as M
 import Data.Maybe (isNothing, fromJust, isJust)
+import Data.Foldable (foldrM)
 
 
 type Graph    = Gr String Distance  -- Graphs have nodes labelled with Strings and edges labelled with their distance
@@ -106,12 +107,23 @@ initialise
     -> Node
     -> IO (Buckets, TentativeDistances)
 initialise graph delta source = do
-  undefined
+  let amountOfNodes = length $ G.nodes graph
+  tentatives <- M.replicate amountOfNodes infinity
+
+  let lEdges = G.labEdges graph
+  let maximumDistance = maximum (map (\(_, _, distance) -> distance) lEdges) -- find longest edge
+  bucketVector <- V.replicate (ceiling $ maximumDistance / delta) Set.empty
+
+  firstBucketIORef <- newIORef 0
+  let buckets = Buckets {firstBucket = firstBucketIORef, bucketArray = bucketVector}
+  relax buckets tentatives delta (source, 0)
+
+  return (buckets, tentatives)
 
 
 -- Take a single step of the algorithm.
 -- That is, one iteration of the outer while loop.
---
+
 step
     :: Bool
     -> Int
@@ -128,7 +140,52 @@ step verbose threadCount graph delta buckets distances = do
   -- For debugging purposes, you may want to place:
   --   printVerbose verbose "inner step" graph delta buckets distances
   -- in the inner loop.
-  undefined
+
+  -- get current index and bucket
+  realIndex <- findNextBucket buckets
+  let bucketVector = bucketArray buckets
+  currentBucket <- V.read bucketVector realIndex
+
+  -- divide bucket equally
+  let bucketLength = Set.size currentBucket
+  let bucketRanges = getEqualRanges threadCount (0, bucketLength)
+
+  -- create MVars for remembering
+  reqs <- newMVar Map.empty
+  visited <- newMVar Set.empty
+
+  -- inner loop
+  let
+    loop = do
+      if Set.null currentBucket then return ()
+      else do
+        -- create requests for light edges in parallel
+        forkThreads threadCount $
+          addRequests (<delta) graph currentBucket bucketRanges distances reqs
+
+        -- read the results
+        requests <- readMVar reqs
+
+        -- remember which nodes have been in the current bucket
+        visited' <- takeMVar visited
+        let nodes = Map.keys requests
+        let newSet = foldr Set.insert visited' nodes
+        putMVar visited newSet
+        
+        -- make the current bucket empty
+        V.write bucketVector realIndex Set.empty
+
+        relaxRequests threadCount buckets distances delta requests
+
+        loop
+  loop
+
+  -- create requests for heavy edges in parallel
+  forkThreads threadCount $
+    addRequests (>delta) graph currentBucket bucketRanges distances reqs
+
+  requests <- readMVar reqs
+  relaxRequests threadCount buckets distances delta requests
 
 
 -- Once all buckets are empty, the tentative distances are finalised and the
@@ -139,11 +196,11 @@ allBucketsEmpty buckets = do
   let
     loop index = do
       let vector = bucketArray buckets
-      maybeValue <- V.readMaybe vector index
+      maybeSet <- V.readMaybe vector index
 
-      if isNothing maybeValue then return True -- if value is nothing it means we went out of range and there are only empty buckets
+      if isNothing maybeSet then return True -- if value is nothing it means we went out of range and there are only empty buckets
       else do
-        let value = fromJust maybeValue
+        let value = fromJust maybeSet
         if not (Set.null value) then return False -- if there is a set that is not empty immediately return False
         else do loop (index + 1)
   loop 0
@@ -156,17 +213,19 @@ findNextBucket :: Buckets -> IO Int
 findNextBucket buckets = do
   let
     loop :: Int -> IO Int
-    loop index = do
-      let vector = bucketArray buckets
-      maybeSet <- V.readMaybe vector index
-      if isJust maybeSet then do
-          let set = fromJust maybeSet
-          if Set.null set then do
-            loop (index + 1)
-          else return index
-      else return (-1)
+    loop bucketIndex = do
+      let bucketVector = bucketArray buckets
+      let size = V.length bucketVector
+      let realIndex = bucketIndex `mod` size
 
-  loop 0
+      maybeSet <- V.readMaybe bucketVector realIndex
+      let set = fromJust maybeSet
+      if Set.null set then do
+        loop (bucketIndex + 1)
+      else return realIndex
+
+  firstBuck <- readIORef (firstBucket buckets)
+  loop firstBuck
 
 
 type Range = (Int, Int)
@@ -185,52 +244,54 @@ getEqualRanges amountOfRanges range@(a, _) = f amountOfRanges range a where
 
 
 addRequests
-    :: Int
-    -> (Distance -> Bool)
+    :: (Distance -> Bool)
     -> Graph
     -> IntSet
+    -> [Range]
     -> TentativeDistances
-    -> IORef (IntMap Distance)
+    -> MVar (IntMap Distance)
     -> Int
     -> IO ()
-    -- because we only add elements to the map, this is a wait-free algorithm and we can just use an IORef
-addRequests threadCount p graph v' distances mapRef threadIndex =  do
-  current <- readIORef mapRef
-  newRequests <- findRequests threadCount p graph v' distances threadIndex
-  writeIORef mapRef (Map.union current newRequests) 
+addRequests p graph v' bucketSlices distances mapRef threadIndex = do
+  let bucketSlice = bucketSlices !! threadIndex
+  newRequests <- findRequests p graph v' bucketSlice distances
+
+  -- critical section, write to shared variable
+  current <- takeMVar mapRef
+  putMVar mapRef (Map.union current newRequests)
 
 
 -- Create requests of (node, distance) pairs that fulfil the given predicate
 --
 findRequests
-    :: Int
-    -> (Distance -> Bool)
+    :: (Distance -> Bool)
     -> Graph
     -> IntSet
+    -> Range
     -> TentativeDistances
-    -> Int
     -> IO (IntMap Distance)
-findRequests threadCount p graph v' distances threadIndex = do
-  let requests = map handleNode [fst bucketSlice .. snd bucketSlice] -- for each node make a map of requests
+findRequests p graph v' bucketSlice distances = do
+  let requestsIO = map handleNode [fst bucketSlice .. snd bucketSlice] -- for each node make a map of requests
+  requests <- sequence requestsIO
   return $ foldr Map.union Map.empty requests -- combine all the requests
   where
-    bucketLength = Set.size v'
-    bucketSlice = getEqualRanges threadCount (0, bucketLength) !! threadIndex -- the part of the bucket this thread will do
-    
-    handleNode :: Int -> IntMap Distance
+    handleNode :: Int -> IO (IntMap Distance)
     handleNode index =
-      foldr addToMap Map.empty validNeighbours where 
+      foldrM addToMap Map.empty validNeighbours where
         node :: Node -- Node is alias for int
         node = Set.elems v' !! index
 
-        neighbours :: [(Distance, Node)] 
+        neighbours :: [(Distance, Node)]
         neighbours = G.lneighbors graph node
 
-        validNeighbours :: [(Distance, Node)] 
+        validNeighbours :: [(Distance, Node)]
         validNeighbours = filter (p.fst) neighbours
 
-        addToMap :: (Distance, Node) -> IntMap Distance -> IntMap Distance
-        addToMap = (uncurry.flip) Map.insert
+        addToMap :: (Distance, Node) -> IntMap Distance -> IO (IntMap Distance)
+        addToMap (distance, neighbour) oldMap = do
+          tentative <- M.read distances node
+          let newDistance = tentative + distance
+          return $ Map.insert neighbour newDistance oldMap
 
 
 -- Execute requests for each of the given (node, distance) pairs
@@ -259,16 +320,23 @@ relax :: Buckets
       -> IO ()
 relax buckets distances delta (node, newDistance) = do
    tent <- M.read distances node
-   if newDistance < tent then do
-    -- remove from old bucket
-    firstBuck <- readIORef (firstBucket buckets)
-    let remIndex  = floor (div tent delta) - firstBuck
-    let newBucket = Set.delete node (V.elem remIndex)
-    -- insert into new bucket
-    let addIndex   = div newDistance delta
-    let newBucket' = Set.insert newDistance (buckets Map.! addIndex)
-    return ()
-   else undefined
+   when (newDistance < tent) (
+    do
+      let size = V.length $ bucketArray buckets
+      -- remove from old bucket
+      let remIndex = floor (tent / delta) `mod` size -- should be something with modulo the length of the bucket vector
+      oldBucket <- V.read (bucketArray buckets) remIndex
+      V.write (bucketArray buckets) remIndex (Set.delete node oldBucket)
+
+      -- insert into new bucket
+      let addIndex = floor (newDistance / delta) `mod` size
+      newBucket <- V.read (bucketArray buckets) addIndex
+      V.write (bucketArray buckets) addIndex (Set.insert node newBucket)
+
+      M.write distances node newDistance
+    )
+
+-- add locking 
 
 
 
